@@ -94,7 +94,7 @@ export async function POST(request: NextRequest) {
     console.log('[analyze-edit-intent] File summary preview:', fileSummary.split('\n').slice(0, 5).join('\n'));
     
     // Select the appropriate AI model based on the request
-    let aiModel;
+  let aiModel: any;
     if (model.startsWith('anthropic/')) {
       aiModel = anthropic(model.replace('anthropic/', ''));
     } else if (model.startsWith('openai/')) {
@@ -114,7 +114,7 @@ export async function POST(request: NextRequest) {
     
     // Use AI to create a search plan
     const result = await generateObject({
-      model: aiModel,
+      model: aiModel as any, // Cast to satisfy LanguageModel type
       schema: searchPlanSchema,
       messages: [
         {

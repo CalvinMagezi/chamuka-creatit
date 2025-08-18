@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
+import type { ApplyCodeStreamMessage, ApplyCodeStreamSuccess, GeneratedFile } from '@/types/sandbox';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { appConfig } from '@/config/app.config';
 import { Button } from '@/components/ui/button';
@@ -22,6 +23,7 @@ import {
 } from '@/lib/icons';
 import { motion, AnimatePresence } from 'framer-motion';
 import CodeApplicationProgress, { type CodeApplicationState } from '@/components/CodeApplicationProgress';
+import Image from 'next/image';
 
 interface SandboxData {
   sandboxId: string;
@@ -42,7 +44,7 @@ interface ChatMessage {
   };
 }
 
-export default function AISandboxPage() {
+function AISandboxPageInner() {
   const [sandboxData, setSandboxData] = useState<SandboxData | null>(null);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState({ text: 'Not connected', active: false });
@@ -119,7 +121,7 @@ export default function AISandboxPage() {
     thinkingText?: string;
     thinkingDuration?: number;
     currentFile?: { path: string; content: string; type: string };
-    files: Array<{ path: string; content: string; type: string; completed: boolean }>;
+    files: Array<GeneratedFile>;
     lastProcessedPosition: number;
     isEdit?: boolean;
   }>({
@@ -497,10 +499,11 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         throw new Error(`Failed to apply code: ${response.statusText}`);
       }
       
-      // Handle streaming response
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let finalData: any = null;
+  // Handle streaming response
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+  let successData: ApplyCodeStreamSuccess | null = null;
+  const cumulative: { filesCreated: string[]; filesUpdated: string[] } = { filesCreated: [], filesUpdated: [] };
       
       while (reader) {
         const { done, value } = await reader.read();
@@ -512,7 +515,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             try {
-              const data = JSON.parse(line.slice(6));
+              const data: any = JSON.parse(line.slice(6));
               
               switch (data.type) {
                 case 'start':
@@ -520,46 +523,42 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                   setCodeApplicationState({ stage: 'analyzing' });
                   break;
                   
-                case 'step':
-                  // Update progress state based on step
-                  if (data.message.includes('Installing') && data.packages) {
-                    setCodeApplicationState({ 
-                      stage: 'installing', 
-                      packages: data.packages 
-                    });
-                  } else if (data.message.includes('Creating files') || data.message.includes('Applying')) {
-                    setCodeApplicationState({ 
-                      stage: 'applying',
-                      filesGenerated: results.filesCreated 
-                    });
+                case 'step': {
+                  const step: any = data;
+                  if (step.message?.includes('Installing') && step.packages) {
+                    setCodeApplicationState({ stage: 'installing', packages: step.packages });
+                  } else if (step.message?.includes('Creating files') || step.message?.includes('Applying')) {
+                    setCodeApplicationState({ stage: 'applying', filesGenerated: cumulative.filesCreated });
                   }
                   break;
+                }
                   
-                case 'package-progress':
-                  // Handle package installation progress
-                  if (data.installedPackages) {
-                    setCodeApplicationState(prev => ({ 
-                      ...prev,
-                      installedPackages: data.installedPackages 
-                    }));
+                case 'package-progress': {
+                  const prog: any = data;
+                  if (prog.installedPackages) {
+                    setCodeApplicationState(prev => ({ ...prev, installedPackages: prog.installedPackages }));
                   }
                   break;
+                }
                   
-                case 'command':
-                  // Don't show npm install commands - they're handled by info messages
-                  if (data.command && !data.command.includes('npm install')) {
-                    addChatMessage(data.command, 'command', { commandType: 'input' });
+                case 'command': {
+                  const cmd: any = data;
+                  if (cmd.command && !cmd.command.includes('npm install')) {
+                    addChatMessage(cmd.command, 'command', { commandType: 'input' });
                   }
                   break;
+                }
                   
-                case 'success':
-                  if (data.installedPackages) {
-                    setCodeApplicationState(prev => ({ 
-                      ...prev,
-                      installedPackages: data.installedPackages 
-                    }));
+                case 'success': {
+                  const success = data as ApplyCodeStreamSuccess;
+                  successData = success;
+                  if (success.filesCreated) cumulative.filesCreated.push(...success.filesCreated);
+                  if (success.filesUpdated) cumulative.filesUpdated.push(...success.filesUpdated);
+                  if (success.installedPackages) {
+                    setCodeApplicationState(prev => ({ ...prev, installedPackages: success.installedPackages }));
                   }
                   break;
+                }
                   
                 case 'file-progress':
                   // Skip file progress messages, they're noisy
@@ -588,12 +587,8 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                   break;
                   
                 case 'complete':
-                  finalData = data;
                   setCodeApplicationState({ stage: 'complete' });
-                  // Clear the state after a delay
-                  setTimeout(() => {
-                    setCodeApplicationState({ stage: null });
-                  }, 3000);
+                  setTimeout(() => setCodeApplicationState({ stage: null }), 3000);
                   break;
                   
                 case 'error':
@@ -618,266 +613,29 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         }
       }
       
-      // Process final data
-      if (finalData && finalData.type === 'complete') {
-        const data = {
-          success: true,
-          results: finalData.results,
-          explanation: finalData.explanation,
-          structure: finalData.structure,
-          message: finalData.message
-        };
-        
-        if (data.success) {
-          const { results } = data;
-        
-        // Log package installation results without duplicate messages
-        if (results.packagesInstalled?.length > 0) {
-          log(`Packages installed: ${results.packagesInstalled.join(', ')}`);
-        }
-        
-        if (results.filesCreated?.length > 0) {
-          log('Files created:');
-          results.filesCreated.forEach((file: string) => {
-            log(`  ${file}`, 'command');
-          });
-          
-          // Verify files were actually created by refreshing the sandbox if needed
-          if (sandboxData?.sandboxId && results.filesCreated.length > 0) {
-            // Small delay to ensure files are written
-            setTimeout(() => {
-              // Force refresh the iframe to show new files
-              if (iframeRef.current) {
-                iframeRef.current.src = iframeRef.current.src;
-              }
-            }, 1000);
-          }
-        }
-        
-        if (results.filesUpdated?.length > 0) {
-          log('Files updated:');
-          results.filesUpdated.forEach((file: string) => {
-            log(`  ${file}`, 'command');
-          });
-        }
-        
-        // Update conversation context with applied code
+      // After streaming completes: process success data & follow-up tasks
+      if (successData) {
+        // Update conversation context
         setConversationContext(prev => ({
           ...prev,
-          appliedCode: [...prev.appliedCode, {
-            files: [...(results.filesCreated || []), ...(results.filesUpdated || [])],
+            appliedCode: [...prev.appliedCode, {
+            files: [...(successData.filesCreated || []), ...(successData.filesUpdated || [])],
             timestamp: new Date()
           }]
         }));
-        
-        if (results.commandsExecuted?.length > 0) {
-          log('Commands executed:');
-          results.commandsExecuted.forEach((cmd: string) => {
-            log(`  $ ${cmd}`, 'command');
-          });
-        }
-        
-        if (results.errors?.length > 0) {
-          results.errors.forEach((err: string) => {
-            log(err, 'error');
-          });
-        }
-        
-        if (data.structure) {
-          displayStructure(data.structure);
-        }
-        
-        if (data.explanation) {
-          log(data.explanation);
-        }
-        
-        if (data.autoCompleted) {
-          log('Auto-generating missing components...', 'command');
-          
-          if (data.autoCompletedComponents) {
-            setTimeout(() => {
-              log('Auto-generated missing components:', 'info');
-              data.autoCompletedComponents.forEach((comp: string) => {
-                log(`  ${comp}`, 'command');
-              });
-            }, 1000);
-          }
-        } else if (data.warning) {
-          log(data.warning, 'error');
-          
-          if (data.missingImports && data.missingImports.length > 0) {
-            const missingList = data.missingImports.join(', ');
-            addChatMessage(
-              `Ask me to "create the missing components: ${missingList}" to fix these import errors.`,
-              'system'
-            );
-          }
-        }
-        
         log('Code applied successfully!');
-        console.log('[applyGeneratedCode] Response data:', data);
-        console.log('[applyGeneratedCode] Debug info:', data.debug);
-        console.log('[applyGeneratedCode] Current sandboxData:', sandboxData);
-        console.log('[applyGeneratedCode] Current iframe element:', iframeRef.current);
-        console.log('[applyGeneratedCode] Current iframe src:', iframeRef.current?.src);
-        
-        if (results.filesCreated?.length > 0) {
-          setConversationContext(prev => ({
-            ...prev,
-            appliedCode: [...prev.appliedCode, {
-              files: results.filesCreated,
-              timestamp: new Date()
-            }]
-          }));
-          
-          // Update the chat message to show success
-          // Only show file list if not in edit mode
-          if (isEdit) {
-            addChatMessage(`Edit applied successfully!`, 'system');
-          } else {
-            // Check if this is part of a generation flow (has recent AI recreation message)
-            const recentMessages = chatMessages.slice(-5);
-            const isPartOfGeneration = recentMessages.some(m => 
-              m.content.includes('AI recreation generated') || 
-              m.content.includes('Code generated')
-            );
-            
-            // Don't show files if part of generation flow to avoid duplication
-            if (isPartOfGeneration) {
-              addChatMessage(`Applied ${results.filesCreated.length} files successfully!`, 'system');
-            } else {
-              addChatMessage(`Applied ${results.filesCreated.length} files successfully!`, 'system', {
-                appliedFiles: results.filesCreated
-              });
-            }
-          }
-          
-          // If there are failed packages, add a message about checking for errors
-          if (results.packagesFailed?.length > 0) {
-            addChatMessage(`⚠️ Some packages failed to install. Check the error banner above for details.`, 'system');
-          }
-          
-          // Fetch updated file structure
-          await fetchSandboxFiles();
-          
-          // Automatically check and install any missing packages
-          await checkAndInstallPackages();
-          
-          // Test build to ensure everything compiles correctly
-          // Skip build test for now - it's causing errors with undefined activeSandbox
-          // The build test was trying to access global.activeSandbox from the frontend,
-          // but that's only available in the backend API routes
-          console.log('[build-test] Skipping build test - would need API endpoint');
-          
-          // Force iframe refresh after applying code
-          const refreshDelay = appConfig.codeApplication.defaultRefreshDelay; // Allow Vite to process changes
-          
-          setTimeout(() => {
-            if (iframeRef.current && sandboxData?.url) {
-              console.log('[home] Refreshing iframe after code application...');
-              
-              // Method 1: Change src with timestamp
-              const urlWithTimestamp = `${sandboxData.url}?t=${Date.now()}&applied=true`;
-              iframeRef.current.src = urlWithTimestamp;
-              
-              // Method 2: Force reload after a short delay
-              setTimeout(() => {
-                try {
-                  if (iframeRef.current?.contentWindow) {
-                    iframeRef.current.contentWindow.location.reload();
-                    console.log('[home] Force reloaded iframe content');
-                  }
-                } catch (e) {
-                  console.log('[home] Could not reload iframe (cross-origin):', e);
-                }
-              }, 1000);
-            }
-          }, refreshDelay);
-          
-          // Vite error checking removed - handled by template setup
-        }
-        
-          // Give Vite HMR a moment to detect changes, then ensure refresh
+        // Fetch latest files & attempt package install checks
+        await fetchSandboxFiles();
+        await checkAndInstallPackages();
+        // Refresh iframe
+        const refreshDelay = (successData.installedPackages?.length ? appConfig.codeApplication.packageInstallRefreshDelay : appConfig.codeApplication.defaultRefreshDelay);
+        setTimeout(() => {
           if (iframeRef.current && sandboxData?.url) {
-            // Wait for Vite to process the file changes
-            // If packages were installed, wait longer for Vite to restart
-            const packagesInstalled = results?.packagesInstalled?.length > 0 || data.results?.packagesInstalled?.length > 0;
-            const refreshDelay = packagesInstalled ? appConfig.codeApplication.packageInstallRefreshDelay : appConfig.codeApplication.defaultRefreshDelay;
-            console.log(`[applyGeneratedCode] Packages installed: ${packagesInstalled}, refresh delay: ${refreshDelay}ms`);
-            
-            setTimeout(async () => {
-            if (iframeRef.current && sandboxData?.url) {
-              console.log('[applyGeneratedCode] Starting iframe refresh sequence...');
-              console.log('[applyGeneratedCode] Current iframe src:', iframeRef.current.src);
-              console.log('[applyGeneratedCode] Sandbox URL:', sandboxData.url);
-              
-              // Method 1: Try direct navigation first
-              try {
-                const urlWithTimestamp = `${sandboxData.url}?t=${Date.now()}&force=true`;
-                console.log('[applyGeneratedCode] Attempting direct navigation to:', urlWithTimestamp);
-                
-                // Remove any existing onload handler
-                iframeRef.current.onload = null;
-                
-                // Navigate directly
-                iframeRef.current.src = urlWithTimestamp;
-                
-                // Wait a bit and check if it loaded
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
-                // Try to access the iframe content to verify it loaded
-                try {
-                  const iframeDoc = iframeRef.current.contentDocument || iframeRef.current.contentWindow?.document;
-                  if (iframeDoc && iframeDoc.readyState === 'complete') {
-                    console.log('[applyGeneratedCode] Iframe loaded successfully');
-                    return;
-                  }
-                } catch (e) {
-                  console.log('[applyGeneratedCode] Cannot access iframe content (CORS), assuming loaded');
-                  return;
-                }
-              } catch (e) {
-                console.error('[applyGeneratedCode] Direct navigation failed:', e);
-              }
-              
-              // Method 2: Force complete iframe recreation if direct navigation failed
-              console.log('[applyGeneratedCode] Falling back to iframe recreation...');
-              const parent = iframeRef.current.parentElement;
-              const newIframe = document.createElement('iframe');
-              
-              // Copy attributes
-              newIframe.className = iframeRef.current.className;
-              newIframe.title = iframeRef.current.title;
-              newIframe.allow = iframeRef.current.allow;
-              // Copy sandbox attributes
-              const sandboxValue = iframeRef.current.getAttribute('sandbox');
-              if (sandboxValue) {
-                newIframe.setAttribute('sandbox', sandboxValue);
-              }
-              
-              // Remove old iframe
-              iframeRef.current.remove();
-              
-              // Add new iframe
-              newIframe.src = `${sandboxData.url}?t=${Date.now()}&recreated=true`;
-              parent?.appendChild(newIframe);
-              
-              // Update ref
-              (iframeRef as any).current = newIframe;
-              
-              console.log('[applyGeneratedCode] Iframe recreated with new content');
-            } else {
-              console.error('[applyGeneratedCode] No iframe or sandbox URL available for refresh');
-            }
-          }, refreshDelay); // Dynamic delay based on whether packages were installed
-        }
-        
-        } else {
-          throw new Error(finalData?.error || 'Failed to apply code');
-        }
+            iframeRef.current.src = `${sandboxData.url}?t=${Date.now()}&applied=true`;
+          }
+        }, refreshDelay);
       } else {
-        // If no final data was received, still close loading
-        addChatMessage('Code application may have partially succeeded. Check the preview.', 'system');
+        addChatMessage('Code application finished without explicit success payload. Please verify output.', 'system');
       }
     } catch (error: any) {
       log(`Failed to apply code: ${error.message}`, 'error');
@@ -1407,7 +1165,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
               ref={iframeRef}
               src={sandboxData.url}
               className="w-full h-full border-none"
-              title="Open Lovable Sandbox"
+              title="Chamuka Creatit Sandbox"
               allow="clipboard-write"
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
             />
@@ -2787,12 +2545,12 @@ Focus on the key sections and content, making it clean and modern.`;
           {/* Header */}
           <div className="absolute top-0 left-0 right-0 z-20 px-6 py-4 flex items-center justify-between animate-[fadeIn_0.8s_ease-out]">
             <img
-              src="/firecrawl-logo-with-fire.webp"
+              src="/logo.png"
               alt="Firecrawl"
               className="h-8 w-auto"
             />
             <a 
-              href="https://github.com/mendableai/open-lovable" 
+              href="https://github.com/CalvinMagezi/chamuka-creatit" 
               target="_blank" 
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 bg-[#36322F] text-white px-3 py-2 rounded-[10px] text-sm font-medium [box-shadow:inset_0px_-2px_0px_0px_#171310,_0px_1px_6px_0px_rgba(58,_33,_8,_58%)] hover:translate-y-[1px] hover:scale-[0.98] hover:[box-shadow:inset_0px_-1px_0px_0px_#171310,_0px_1px_3px_0px_rgba(58,_33,_8,_40%)] active:translate-y-[2px] active:scale-[0.97] active:[box-shadow:inset_0px_1px_1px_0px_#171310,_0px_1px_2px_0px_rgba(58,_33,_8,_30%)] transition-all duration-200"
@@ -2805,11 +2563,19 @@ Focus on the key sections and content, making it clean and modern.`;
           {/* Main content */}
           <div className="relative z-10 h-full flex items-center justify-center px-4">
             <div className="text-center max-w-4xl min-w-[600px] mx-auto">
-              {/* Firecrawl-style Header */}
+             <div className="flex justify-center items-center">
+               <Image
+                src="/icon.png"
+                alt="ChamukaCreatit"
+                className="h-24 w-auto rounded-full"
+                width={180}
+                height={180}
+              />
+             </div>
               <div className="text-center">
                 <h1 className="text-[2.5rem] lg:text-[3.8rem] text-center text-[#36322F] font-semibold tracking-tight leading-[0.9] animate-[fadeIn_0.8s_ease-out]">
-                  <span className="hidden md:inline">Open Lovable</span>
-                  <span className="md:hidden">Open Lovable</span>
+                  <span className="hidden md:inline">Chamuka Creatit</span>
+                  <span className="md:hidden">Chamuka</span>
                 </h1>
                 <motion.p 
                   className="text-base lg:text-lg max-w-lg mx-auto mt-2.5 text-zinc-500 text-center text-balance"
@@ -2991,7 +2757,7 @@ Focus on the key sections and content, making it clean and modern.`;
                 >
                   {appConfig.ai.availableModels.map(model => (
                     <option key={model} value={model}>
-                      {appConfig.ai.modelDisplayNames[model] || model}
+                      {(appConfig.ai.modelDisplayNames as Record<string,string>)[model] || model}
                     </option>
                   ))}
                 </select>
@@ -3004,7 +2770,7 @@ Focus on the key sections and content, making it clean and modern.`;
       <div className="bg-card px-4 py-4 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-4">
           <img
-            src="/firecrawl-logo-with-fire.webp"
+            src="/logo.png"
             alt="Firecrawl"
             className="h-8 w-auto"
           />
@@ -3027,7 +2793,7 @@ Focus on the key sections and content, making it clean and modern.`;
           >
             {appConfig.ai.availableModels.map(model => (
               <option key={model} value={model}>
-                {appConfig.ai.modelDisplayNames[model] || model}
+                {(appConfig.ai.modelDisplayNames as Record<string,string>)[model] || model}
               </option>
             ))}
           </select>
@@ -3425,5 +3191,15 @@ Focus on the key sections and content, making it clean and modern.`;
 
 
     </div>
+  );
+}
+
+export const dynamic = 'force-dynamic';
+
+export default function Page() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-screen text-gray-500 text-sm">Loading Chamuka Creatit...</div>}>
+      <AISandboxPageInner />
+    </Suspense>
   );
 }

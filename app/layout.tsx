@@ -5,8 +5,8 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Open Lovable",
-  description: "Re-imagine any website in seconds with AI-powered website builder.",
+  title: "Chamuka Creatit",
+  description: "Re-imagine any website in seconds with Chamuka Creatit AI builder.",
 };
 
 export default function RootLayout({

@@ -21,6 +21,36 @@ export interface SandboxState {
   } | null;
 }
 
+// Streaming apply code response message types
+export interface ApplyCodeStreamStart { type: 'start'; }
+export interface ApplyCodeStreamStep { type: 'step'; message: string; packages?: string[]; }
+export interface ApplyCodeStreamPackageProgress { type: 'package-progress'; installedPackages?: string[]; }
+export interface ApplyCodeStreamCommand { type: 'command'; command: string; }
+export interface ApplyCodeStreamSuccess { 
+  type: 'success'; 
+  installedPackages?: string[]; 
+  filesCreated?: string[]; 
+  filesUpdated?: string[]; 
+  commandsExecuted?: string[]; 
+  errors?: string[]; 
+  structure?: any; 
+  explanation?: string; 
+  autoCompleted?: boolean; 
+  autoCompletedComponents?: string[]; 
+  warning?: string; 
+  missingImports?: string[]; 
+  debug?: any; 
+}
+export type ApplyCodeStreamMessage = ApplyCodeStreamStart | ApplyCodeStreamStep | ApplyCodeStreamPackageProgress | ApplyCodeStreamCommand | ApplyCodeStreamSuccess;
+
+export interface GeneratedFile {
+  path: string;
+  content: string;
+  type: string;
+  completed: boolean;
+  edited?: boolean;
+}
+
 // Declare global types
 declare global {
   var activeSandbox: any;
