@@ -2192,22 +2192,32 @@ Focus on the key sections and content, making it clean and modern while preservi
     
     setHomeScreenFading(true);
     
-    // Clear messages and immediately show the cloning message
+    // Clear messages
     setChatMessages([]);
-    let displayUrl = homeUrlInput.trim();
-    if (!displayUrl.match(/^https?:\/\//i)) {
-      displayUrl = 'https://' + displayUrl;
+    
+    // Detect if input is a URL or a prompt
+    const input = homeUrlInput.trim();
+    const urlPattern = /^(https?:\/\/)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(\/?.*)?$/;
+    const isUrl = urlPattern.test(input);
+    
+    let displayUrl = input;
+    if (isUrl) {
+      // Handle URL cloning
+      if (!displayUrl.match(/^https?:\/\//i)) {
+        displayUrl = 'https://' + displayUrl;
+      }
+      const cleanUrl = displayUrl.replace(/^https?:\/\//i, '');
+      addChatMessage(`Starting to clone ${cleanUrl}...`, 'system');
+    } else {
+      // Handle prompt-based generation
+      addChatMessage(`Creating: ${input}`, 'system');
     }
-    // Remove protocol for cleaner display
-    const cleanUrl = displayUrl.replace(/^https?:\/\//i, '');
-    addChatMessage(`Starting to clone ${cleanUrl}...`, 'system');
     
     // Start creating sandbox and capturing screenshot immediately in parallel
     const sandboxPromise = !sandboxData ? createSandbox(true) : Promise.resolve();
     
-    // Only capture screenshot if we don't already have a sandbox (first generation)
-    // After sandbox is set up, skip the screenshot phase for faster generation
-    if (!sandboxData) {
+    // Only capture screenshot for URLs, not for prompts
+    if (isUrl && !sandboxData) {
       captureUrlScreenshot(displayUrl);
     }
     
@@ -2223,17 +2233,18 @@ Focus on the key sections and content, making it clean and modern while preservi
       // Wait for sandbox to be ready (if it's still creating)
       await sandboxPromise;
       
-      // Now start the clone process which will stream the generation
-      setUrlInput(homeUrlInput);
-      setUrlOverlayVisible(false); // Make sure overlay is closed
-      setUrlStatus(['Scraping website content...']);
-      
-      try {
-        // Scrape the website
-        let url = homeUrlInput.trim();
-        if (!url.match(/^https?:\/\//i)) {
-          url = 'https://' + url;
-        }
+      if (isUrl) {
+        // Clone website flow
+        setUrlInput(homeUrlInput);
+        setUrlOverlayVisible(false); // Make sure overlay is closed
+        setUrlStatus(['Scraping website content...']);
+        
+        try {
+          // Scrape the website
+          let url = homeUrlInput.trim();
+          if (!url.match(/^https?:\/\//i)) {
+            url = 'https://' + url;
+          }
         
         // Screenshot is already being captured in parallel above
         
@@ -2280,7 +2291,7 @@ Focus on the key sections and content, making it clean and modern while preservi
           currentProject: `${url} Clone`
         }));
         
-        const prompt = `I want to recreate the ${url} website as a complete React application based on the scraped content below.
+          const prompt = `I want to recreate the ${url} website as a complete React application based on the scraped content below.
 
 ${JSON.stringify(scrapeData, null, 2)}
 
@@ -2572,6 +2583,224 @@ Focus on the key sections and content, making it clean and modern.`;
           files: prev.files
         }));
       }
+    } else {
+      // Prompt-based generation flow
+      try {
+        setLoadingStage('planning');
+        setActiveTab('generation');
+        
+        // Store the prompt in conversation context
+        setConversationContext(prev => ({
+          ...prev,
+          currentProject: input
+        }));
+        
+        // Combine the main prompt with any style/context requirements
+        const fullPrompt = `${input}${homeContextInput ? `\n\nADDITIONAL REQUIREMENTS:\n${homeContextInput}` : ''}
+
+IMPORTANT INSTRUCTIONS:
+- Create a COMPLETE, working React application
+- Use Tailwind CSS for all styling (no custom CSS files)
+- Make it responsive and modern
+- Create proper component structure
+- Make sure the app actually renders visible content
+- Create ALL components that you reference in imports
+- Use best practices for React development
+- Add proper state management where needed
+- Ensure the app is functional and interactive`;
+        
+        setGenerationProgress(prev => ({
+          isGenerating: true,
+          status: 'Initializing AI...',
+          components: [],
+          currentComponent: 0,
+          streamedCode: '',
+          isStreaming: true,
+          isThinking: false,
+          thinkingText: undefined,
+          thinkingDuration: undefined,
+          files: prev.files || [],
+          currentFile: undefined,
+          lastProcessedPosition: 0
+        }));
+        
+        // Generate code
+        const generateResponse = await fetch('/api/generate-ai-code-stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: fullPrompt,
+            model: aiModel,
+            files: sandboxFiles,
+            fileStructure: fileStructure,
+            conversationContext,
+            isEdit: false
+          })
+        });
+        
+        if (!generateResponse.ok) {
+          throw new Error('Failed to generate code');
+        }
+        
+        let generatedCode = '';
+        let explanation = '';
+        const reader = generateResponse.body?.getReader();
+        const decoder = new TextDecoder();
+        
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+            
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  
+                  if (data.type === 'stream') {
+                    setGenerationProgress(prev => {
+                      const newStreamedCode = prev.streamedCode + data.content;
+                      const updatedState = {
+                        ...prev,
+                        streamedCode: newStreamedCode,
+                        status: 'Generating code...'
+                      };
+                      
+                      // Parse generated files
+                      const fileMatches = newStreamedCode.matchAll(/<file path="([^"]+)">([^]*?)<\/file>/g);
+                      const newFiles: GeneratedFile[] = [];
+                      const processedFiles = new Set<string>();
+                      
+                      for (const match of fileMatches) {
+                        const filePath = match[1];
+                        const fileContent = match[2];
+                        
+                        if (!processedFiles.has(filePath)) {
+                          const fileExt = filePath.split('.').pop() || '';
+                          const fileType = fileExt === 'jsx' || fileExt === 'js' ? 'javascript' :
+                                          fileExt === 'css' ? 'css' :
+                                          fileExt === 'json' ? 'json' :
+                                          fileExt === 'html' ? 'html' : 'text';
+                          
+                          newFiles.push({
+                            path: filePath,
+                            content: fileContent,
+                            type: fileType,
+                            completed: true
+                          });
+                          
+                          updatedState.files = newFiles;
+                          updatedState.status = `Completed ${filePath}`;
+                          processedFiles.add(filePath);
+                        }
+                      }
+                      
+                      // Check for current file being generated
+                      const lastFileMatch = newStreamedCode.match(/<file path="([^"]+)">([^]*?)$/);
+                      if (lastFileMatch && !lastFileMatch[0].includes('</file>')) {
+                        const filePath = lastFileMatch[1];
+                        const partialContent = lastFileMatch[2];
+                        
+                        if (!processedFiles.has(filePath)) {
+                          const fileExt = filePath.split('.').pop() || '';
+                          const fileType = fileExt === 'jsx' || fileExt === 'js' ? 'javascript' :
+                                          fileExt === 'css' ? 'css' :
+                                          fileExt === 'json' ? 'json' :
+                                          fileExt === 'html' ? 'html' : 'text';
+                          
+                          updatedState.currentFile = { 
+                            path: filePath, 
+                            content: partialContent, 
+                            type: fileType 
+                          };
+                          updatedState.status = `Generating ${filePath}`;
+                        }
+                      } else {
+                        updatedState.currentFile = undefined;
+                      }
+                      
+                      return updatedState;
+                    });
+                  } else if (data.type === 'complete') {
+                    generatedCode = data.generatedCode;
+                    explanation = data.explanation;
+                    
+                    setConversationContext(prev => ({
+                      ...prev,
+                      lastGeneratedCode: generatedCode
+                    }));
+                  }
+                } catch (e) {
+                  console.error('Failed to parse SSE data:', e);
+                }
+              }
+            }
+          }
+        }
+        
+        setGenerationProgress(prev => ({
+          ...prev,
+          isGenerating: false,
+          isStreaming: false,
+          status: 'Generation complete!'
+        }));
+        
+        if (generatedCode) {
+          addChatMessage('Code generated successfully!', 'system');
+          
+          if (explanation && explanation.trim()) {
+            addChatMessage(explanation, 'ai');
+          }
+          
+          setPromptInput(generatedCode);
+          
+          // Apply the generated code
+          await applyGeneratedCode(generatedCode, false);
+          
+          addChatMessage(
+            `Successfully created your app: "${input}"! You can continue refining it by chatting with me.`, 
+            'ai',
+            {
+              generatedCode: generatedCode
+            }
+          );
+          
+          setConversationContext(prev => ({
+            ...prev,
+            generatedComponents: [],
+            appliedCode: [...prev.appliedCode, {
+              files: [],
+              timestamp: new Date()
+            }]
+          }));
+        } else {
+          throw new Error('Failed to generate code');
+        }
+        
+        // Clear inputs and states
+        setHomeUrlInput('');
+        setHomeContextInput('');
+        setLoadingStage(null);
+        
+        setTimeout(() => {
+          setActiveTab('preview');
+        }, 1000);
+        
+      } catch (error: any) {
+        addChatMessage(`Failed to generate app: ${error.message}`, 'system');
+        setLoadingStage(null);
+        setGenerationProgress(prev => ({
+          ...prev,
+          isGenerating: false,
+          isStreaming: false,
+          status: '',
+          files: prev.files
+        }));
+      }
+    }
     }, 500);
   };
 
@@ -2664,7 +2893,7 @@ Focus on the key sections and content, making it clean and modern.`;
                   }}
                   transition={{ duration: 0.3, ease: "easeOut" }}
                 >
-                  Re-imagine any website, in seconds.
+                  Build anything with AI. Just describe what you want.
                 </motion.p>
               </div>
               
@@ -2677,9 +2906,8 @@ Focus on the key sections and content, making it clean and modern.`;
                       const value = e.target.value;
                       setHomeUrlInput(value);
                       
-                      // Check if it's a valid domain
-                      const domainRegex = /^(https?:\/\/)?(([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(\/?.*)?$/;
-                      if (domainRegex.test(value) && value.length > 5) {
+                      // Show style selector when user starts typing (either URL or prompt)
+                      if (value.trim().length > 10) {
                         // Small delay to make the animation feel smoother
                         setTimeout(() => setShowStyleSelector(true), 100);
                       } else {
@@ -2688,7 +2916,7 @@ Focus on the key sections and content, making it clean and modern.`;
                       }
                     }}
                     placeholder=" "
-                    aria-placeholder="https://firecrawl.dev"
+                    aria-placeholder="Build a task management app with drag-and-drop..."
                     className="h-[3.25rem] w-full resize-none focus-visible:outline-none focus-visible:ring-orange-500 focus-visible:ring-2 rounded-[18px] text-sm text-[#36322F] px-4 pr-12 border-[.75px] border-border bg-white"
                     style={{
                       boxShadow: '0 0 0 1px #e3e1de66, 0 1px 2px #5f4a2e14, 0 4px 6px #5f4a2e0a, 0 40px 40px -24px #684b2514',
@@ -2702,15 +2930,15 @@ Focus on the key sections and content, making it clean and modern.`;
                       homeUrlInput ? 'opacity-0' : 'opacity-100'
                     }`}
                   >
-                    <span className="text-[#605A57]/50" style={{ fontFamily: 'monospace' }}>
-                      https://firecrawl.dev
+                    <span className="text-[#605A57]/50">
+                      Build a task management app with drag-and-drop...
                     </span>
                   </div>
                   <button
                     type="submit"
                     disabled={!homeUrlInput.trim()}
                     className="absolute top-1/2 transform -translate-y-1/2 right-2 flex h-10 items-center justify-center rounded-md px-3 text-sm font-medium text-zinc-500 hover:text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-950 focus-visible:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    title={selectedStyle ? `Clone with ${selectedStyle} Style` : 'Clone Website'}
+                    title={selectedStyle ? `Generate with ${selectedStyle} Style` : 'Generate App'}
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
                       <polyline points="9 10 4 15 9 20"></polyline>
@@ -2726,7 +2954,7 @@ Focus on the key sections and content, making it clean and modern.`;
                         showStyleSelector ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0'
                       }`}>
                     <div className="bg-white/80 backdrop-blur-sm border border-gray-200 rounded-xl p-4 shadow-sm">
-                      <p className="text-sm text-gray-600 mb-3 font-medium">How do you want your site to look?</p>
+                      <p className="text-sm text-gray-600 mb-3 font-medium">Choose a style for your app:</p>
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                         {[
                           { name: 'Neobrutalist', description: 'Bold colors, thick borders' },
@@ -2811,6 +3039,39 @@ Focus on the key sections and content, making it clean and modern.`;
                         />
                       </div>
                     </div>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Example Prompts */}
+                  {!showStyleSelector && (
+                    <div className="mt-8 max-w-2xl mx-auto">
+                      <p className="text-sm text-gray-600 mb-4 text-center">Try these examples or create anything you imagine:</p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {[
+                          "Build a task management app with drag-and-drop",
+                          "Create a portfolio website with dark mode",
+                          "Design a dashboard with charts and analytics", 
+                          "Make a chat app with real-time messaging",
+                          "Build an e-commerce product page",
+                          "Create a blog with search functionality"
+                        ].map((example, index) => (
+                          <button
+                            key={index}
+                            onClick={() => {
+                              setHomeUrlInput(example);
+                              setTimeout(() => setShowStyleSelector(true), 100);
+                            }}
+                            className="text-left p-3 rounded-lg border border-gray-200 bg-white/50 hover:bg-white hover:border-orange-200 transition-all text-sm text-gray-700 hover:text-gray-900"
+                          >
+                            {example}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="mt-4 text-center">
+                        <p className="text-xs text-gray-500">
+                          Or paste a URL to clone an existing website
+                        </p>
                       </div>
                     </div>
                   )}
