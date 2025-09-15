@@ -5,20 +5,30 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { generateObject } from 'ai';
 import { z } from 'zod';
-import type { FileManifest } from '@/types/file-manifest';
+// import type { FileManifest } from '@/types/file-manifest'; // Type is used implicitly through manifest parameter
+
+// Check if we're using Vercel AI Gateway
+const isUsingAIGateway = !!process.env.AI_GATEWAY_API_KEY;
+const aiGatewayBaseURL = 'https://ai-gateway.vercel.sh/v1';
 
 const groq = createGroq({
-  apiKey: process.env.GROQ_API_KEY,
+  apiKey: process.env.AI_GATEWAY_API_KEY ?? process.env.GROQ_API_KEY,
+  baseURL: isUsingAIGateway ? aiGatewayBaseURL : undefined,
 });
 
 const anthropic = createAnthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  baseURL: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1',
+  apiKey: process.env.AI_GATEWAY_API_KEY ?? process.env.ANTHROPIC_API_KEY,
+  baseURL: isUsingAIGateway ? aiGatewayBaseURL : (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1'),
 });
 
 const openai = createOpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  baseURL: process.env.OPENAI_BASE_URL,
+  apiKey: process.env.AI_GATEWAY_API_KEY ?? process.env.OPENAI_API_KEY,
+  baseURL: isUsingAIGateway ? aiGatewayBaseURL : process.env.OPENAI_BASE_URL,
+});
+
+const googleGenerativeAI = createGoogleGenerativeAI({
+  apiKey: process.env.AI_GATEWAY_API_KEY ?? process.env.GEMINI_API_KEY,
+  baseURL: isUsingAIGateway ? aiGatewayBaseURL : undefined,
 });
 
 // Schema for the AI's search plan - not file selection!
@@ -66,7 +76,7 @@ export async function POST(request: NextRequest) {
     
     // Create a summary of available files for the AI
     const validFiles = Object.entries(manifest.files as Record<string, any>)
-      .filter(([path, info]) => {
+      .filter(([path]) => {
         // Filter out invalid paths
         return path.includes('.') && !path.match(/\/\d+$/);
       });
@@ -74,7 +84,7 @@ export async function POST(request: NextRequest) {
     const fileSummary = validFiles
       .map(([path, info]: [string, any]) => {
         const componentName = info.componentInfo?.name || path.split('/').pop();
-        const hasImports = info.imports?.length > 0;
+        // const hasImports = info.imports?.length > 0; // Kept for future use
         const childComponents = info.componentInfo?.childComponents?.join(', ') || 'none';
         return `- ${path} (${componentName}, renders: ${childComponents})`;
       })
@@ -104,7 +114,7 @@ export async function POST(request: NextRequest) {
         aiModel = openai(model.replace('openai/', ''));
       }
     } else if (model.startsWith('google/')) {
-      aiModel = createGoogleGenerativeAI(model.replace('google/', ''));
+      aiModel = googleGenerativeAI(model.replace('google/', ''));
     } else {
       // Default to groq if model format is unclear
       aiModel = groq(model);

@@ -1,10 +1,10 @@
 # Package Detection and Installation Guide
 
-This document explains how to use the XML-based package detection and installation mechanism in the E2B sandbox environment.
+This document explains how to use the XML-based package detection and installation mechanism in the Vercel Sandbox environment.
 
 ## Overview
 
-The E2B sandbox can automatically detect and install packages from XML tags in AI-generated code responses. This mechanism works alongside the existing file detection system.
+The Vercel Sandbox can automatically detect and install packages from XML tags in AI-generated code responses. This mechanism works alongside the existing file detection system.
 
 ## XML Tag Formats
 
@@ -196,43 +196,37 @@ Directly installs packages in the sandbox.
 3. **Order matters**: Packages are installed before files are created
 4. **Use commands** for post-installation tasks like building or testing
 
-## Integration with E2B Sandbox
+## Integration with Vercel Sandbox
 
-The package detection mechanism integrates seamlessly with the E2B sandbox:
+The package detection mechanism integrates seamlessly with the Vercel Sandbox:
 
-1. Packages are installed in `/home/user/app/node_modules`
-2. The Vite dev server is automatically restarted after package installation
+1. Packages are installed in the sandbox's working directory
+2. The development server is automatically restarted after package installation
 3. All npm operations run within the sandbox environment
 4. Package.json is automatically updated with new dependencies
 
-## E2B Command Execution Methods
+## Vercel Sandbox Command Execution Methods
 
-### Method 1: Using runCode() with Python subprocess
+### Using runCommand() (Recommended)
 ```javascript
-// Current implementation pattern
-await global.activeSandbox.runCode(`
-import subprocess
-import os
-
-os.chdir('/home/user/app')
-result = subprocess.run(['npm', 'install', 'axios'], capture_output=True, text=True)
-print(result.stdout)
-`);
-```
-
-### Method 2: Using commands.run() directly (Recommended)
-```javascript
-// Direct command execution - cleaner approach
-const result = await global.activeSandbox.commands.run('npm install axios', {
-  cwd: '/home/user/app',
-  timeout: 60000
+// Direct command execution using Vercel Sandbox API
+const result = await global.activeSandbox.runCommand({
+  cmd: 'npm',
+  args: ['install', 'axios']
 });
-console.log(result.stdout);
+const stdout = await result.stdout();
+const stderr = await result.stderr();
+console.log(stdout);
 ```
 
 ### Command Execution Options
 
-When using `sandbox.commands.run()`, you can specify:
+When using `sandbox.runCommand()`, you can specify:
+- `cmd`: The command to execute
+- `args`: Array of arguments
+- `detached`: Run in background (for long-running processes)
+- `stdout`: Stream for capturing stdout
+- `stderr`: Stream for capturing stderr
 - `cmd`: Command string to execute
 - `background`: Run in background (true) or wait for completion (false)
 - `envs`: Environment variables as key-value pairs

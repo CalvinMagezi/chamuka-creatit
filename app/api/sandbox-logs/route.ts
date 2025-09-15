@@ -1,10 +1,10 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 
 declare global {
   var activeSandbox: any;
 }
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
     if (!global.activeSandbox) {
       return NextResponse.json({ 
@@ -15,54 +15,69 @@ export async function GET(request: NextRequest) {
     
     console.log('[sandbox-logs] Fetching Vite dev server logs...');
     
-    // Get the last N lines of the Vite dev server output
-    const result = await global.activeSandbox.runCode(`
-import subprocess
-import os
-
-# Try to get the Vite process output
-try:
-    # Read the last 100 lines of any log files
-    log_content = []
+    // Check if Vite processes are running
+    const psResult = await global.activeSandbox.runCommand({
+      cmd: 'ps',
+      args: ['aux']
+    });
     
-    # Check if there are any node processes running
-    ps_result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
-    vite_processes = [line for line in ps_result.stdout.split('\\n') if 'vite' in line.lower()]
+    let viteRunning = false;
+    const logContent: string[] = [];
     
-    if vite_processes:
-        log_content.append("Vite is running")
-    else:
-        log_content.append("Vite process not found")
-    
-    # Try to capture recent console output (this is a simplified approach)
-    # In a real implementation, you'd want to capture the Vite process output directly
-    print(json.dumps({
-        "hasErrors": False,
-        "logs": log_content,
-        "status": "running" if vite_processes else "stopped"
-    }))
-except Exception as e:
-    print(json.dumps({
-        "hasErrors": True,
-        "logs": [str(e)],
-        "status": "error"
-    }))
-    `);
-    
-    try {
-      const logData = JSON.parse(result.output || '{}');
-      return NextResponse.json({
-        success: true,
-        ...logData
-      });
-    } catch {
-      return NextResponse.json({
-        success: true,
-        hasErrors: false,
-        logs: [result.output],
-        status: 'unknown'
-      });
+    if (psResult.exitCode === 0) {
+      const psOutput = await psResult.stdout();
+      const viteProcesses = psOutput.split('\n').filter((line: string) => 
+        line.toLowerCase().includes('vite') || 
+        line.toLowerCase().includes('npm run dev')
+      );
+      
+      viteRunning = viteProcesses.length > 0;
+      
+      if (viteRunning) {
+        logContent.push("Vite is running");
+        logContent.push(...viteProcesses.slice(0, 3)); // Show first 3 processes
+      } else {
+        logContent.push("Vite process not found");
+      }
     }
+    
+    // Try to read any recent log files
+    try {
+      const findResult = await global.activeSandbox.runCommand({
+        cmd: 'find',
+        args: ['/tmp', '-name', '*vite*', '-name', '*.log', '-type', 'f']
+      });
+      
+      if (findResult.exitCode === 0) {
+        const logFiles = (await findResult.stdout()).split('\n').filter((f: string) => f.trim());
+        
+        for (const logFile of logFiles.slice(0, 2)) {
+          try {
+            const catResult = await global.activeSandbox.runCommand({
+              cmd: 'tail',
+              args: ['-n', '10', logFile]
+            });
+            
+            if (catResult.exitCode === 0) {
+              const logFileContent = await catResult.stdout();
+              logContent.push(`--- ${logFile} ---`);
+              logContent.push(logFileContent);
+            }
+          } catch {
+            // Skip if can't read log file
+          }
+        }
+      }
+    } catch {
+      // No log files found, that's OK
+    }
+    
+    return NextResponse.json({
+      success: true,
+      hasErrors: false,
+      logs: logContent,
+      status: viteRunning ? 'running' : 'stopped'
+    });
     
   } catch (error) {
     console.error('[sandbox-logs] Error:', error);

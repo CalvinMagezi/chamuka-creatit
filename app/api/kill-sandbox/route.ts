@@ -1,27 +1,27 @@
 import { NextResponse } from 'next/server';
 
 declare global {
-  var activeSandbox: any;
+  var activeSandboxProvider: any;
   var sandboxData: any;
   var existingFiles: Set<string>;
 }
 
 export async function POST() {
   try {
-    console.log('[kill-sandbox] Killing active sandbox...');
-    
+    console.log('[kill-sandbox] Stopping active sandbox...');
+
     let sandboxKilled = false;
-    
-    // Kill existing sandbox if any
-    if (global.activeSandbox) {
+
+    // Stop existing sandbox if any
+    if (global.activeSandboxProvider) {
       try {
-        await global.activeSandbox.close();
+        await global.activeSandboxProvider.terminate();
         sandboxKilled = true;
-        console.log('[kill-sandbox] Sandbox closed successfully');
+        console.log('[kill-sandbox] Sandbox stopped successfully');
       } catch (e) {
-        console.error('[kill-sandbox] Failed to close sandbox:', e);
+        console.error('[kill-sandbox] Failed to stop sandbox:', e);
       }
-      global.activeSandbox = null;
+      global.activeSandboxProvider = null;
       global.sandboxData = null;
     }
     

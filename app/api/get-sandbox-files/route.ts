@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { parseJavaScriptFile, buildComponentTree } from '@/lib/file-parser';
 import { FileManifest, FileInfo, RouteInfo } from '@/types/file-manifest';
-import type { SandboxState } from '@/types/sandbox';
+// SandboxState type used implicitly through global.activeSandbox
 
 declare global {
   var activeSandbox: any;
@@ -18,58 +18,82 @@ export async function GET() {
 
     console.log('[get-sandbox-files] Fetching and analyzing file structure...');
     
-    // Get all React/JS/CSS files
-    const result = await global.activeSandbox.runCode(`
-import os
-import json
-
-def get_files_content(directory='/home/user/app', extensions=['.jsx', '.js', '.tsx', '.ts', '.css', '.json']):
-    files_content = {}
+    // Get list of all relevant files
+    const findResult = await global.activeSandbox.runCommand({
+      cmd: 'find',
+      args: [
+        '.',
+        '-name', 'node_modules', '-prune', '-o',
+        '-name', '.git', '-prune', '-o',
+        '-name', 'dist', '-prune', '-o',
+        '-name', 'build', '-prune', '-o',
+        '-type', 'f',
+        '(',
+        '-name', '*.jsx',
+        '-o', '-name', '*.js',
+        '-o', '-name', '*.tsx',
+        '-o', '-name', '*.ts',
+        '-o', '-name', '*.css',
+        '-o', '-name', '*.json',
+        ')',
+        '-print'
+      ]
+    });
     
-    for root, dirs, files in os.walk(directory):
-        # Skip node_modules and other unwanted directories
-        dirs[:] = [d for d in dirs if d not in ['node_modules', '.git', 'dist', 'build']]
+    if (findResult.exitCode !== 0) {
+      throw new Error('Failed to list files');
+    }
+    
+    const fileList = (await findResult.stdout()).split('\n').filter((f: string) => f.trim());
+    console.log('[get-sandbox-files] Found', fileList.length, 'files');
+    
+    // Read content of each file (limit to reasonable sizes)
+    const filesContent: Record<string, string> = {};
+    
+    for (const filePath of fileList) {
+      try {
+        // Check file size first
+        const statResult = await global.activeSandbox.runCommand({
+          cmd: 'stat',
+          args: ['-f', '%z', filePath]
+        });
         
-        for file in files:
-            if any(file.endswith(ext) for ext in extensions):
-                file_path = os.path.join(root, file)
-                relative_path = os.path.relpath(file_path, '/home/user/app')
-                
-                try:
-                    with open(file_path, 'r') as f:
-                        content = f.read()
-                        # Only include files under 10KB to avoid huge responses
-                        if len(content) < 10000:
-                            files_content[relative_path] = content
-                except:
-                    pass
+        if (statResult.exitCode === 0) {
+          const fileSize = parseInt(await statResult.stdout());
+          
+          // Only read files smaller than 10KB
+          if (fileSize < 10000) {
+            const catResult = await global.activeSandbox.runCommand({
+              cmd: 'cat',
+              args: [filePath]
+            });
+            
+            if (catResult.exitCode === 0) {
+              const content = await catResult.stdout();
+              // Remove leading './' from path
+              const relativePath = filePath.replace(/^\.\//, '');
+              filesContent[relativePath] = content;
+            }
+          }
+        }
+      } catch (parseError) {
+        console.debug('Error parsing component info:', parseError);
+        // Skip files that can't be read
+        continue;
+      }
+    }
     
-    return files_content
-
-# Get the files
-files = get_files_content()
-
-# Also get the directory structure
-structure = []
-for root, dirs, files in os.walk('/home/user/app'):
-    level = root.replace('/home/user/app', '').count(os.sep)
-    indent = ' ' * 2 * level
-    structure.append(f"{indent}{os.path.basename(root)}/")
-    sub_indent = ' ' * 2 * (level + 1)
-    for file in files:
-        if not any(skip in root for skip in ['node_modules', '.git', 'dist', 'build']):
-            structure.append(f"{sub_indent}{file}")
-
-result = {
-    'files': files,
-    'structure': '\\n'.join(structure[:50])  # Limit structure to 50 lines
-}
-
-print(json.dumps(result))
-    `);
-
-    const output = result.logs.stdout.join('');
-    const parsedResult = JSON.parse(output);
+    // Get directory structure
+    const treeResult = await global.activeSandbox.runCommand({
+      cmd: 'find',
+      args: ['.', '-type', 'd', '-not', '-path', '*/node_modules*', '-not', '-path', '*/.git*']
+    });
+    
+    let structure = '';
+    if (treeResult.exitCode === 0) {
+      const dirs = (await treeResult.stdout()).split('\n').filter((d: string) => d.trim());
+      structure = dirs.slice(0, 50).join('\n'); // Limit to 50 lines
+    }
     
     // Build enhanced file manifest
     const fileManifest: FileManifest = {
@@ -82,12 +106,12 @@ print(json.dumps(result))
     };
     
     // Process each file
-    for (const [relativePath, content] of Object.entries(parsedResult.files)) {
-      const fullPath = `/home/user/app/${relativePath}`;
+    for (const [relativePath, content] of Object.entries(filesContent)) {
+      const fullPath = `/${relativePath}`;
       
       // Create base file info
       const fileInfo: FileInfo = {
-        content: content as string,
+        content: content,
         type: 'utility',
         path: fullPath,
         relativePath,
@@ -96,7 +120,7 @@ print(json.dumps(result))
       
       // Parse JavaScript/JSX files
       if (relativePath.match(/\.(jsx?|tsx?)$/)) {
-        const parseResult = parseJavaScriptFile(content as string, fullPath);
+        const parseResult = parseJavaScriptFile(content, fullPath);
         Object.assign(fileInfo, parseResult);
         
         // Identify entry point
@@ -132,9 +156,9 @@ print(json.dumps(result))
 
     return NextResponse.json({
       success: true,
-      files: parsedResult.files,
-      structure: parsedResult.structure,
-      fileCount: Object.keys(parsedResult.files).length,
+      files: filesContent,
+      structure,
+      fileCount: Object.keys(filesContent).length,
       manifest: fileManifest,
     });
 
@@ -157,7 +181,8 @@ function extractRoutes(files: Record<string, FileInfo>): RouteInfo[] {
       const routeMatches = fileInfo.content.matchAll(/path=["']([^"']+)["'].*(?:element|component)={([^}]+)}/g);
       
       for (const match of routeMatches) {
-        const [, routePath, componentRef] = match;
+        const [, routePath] = match;
+        // componentRef available in match but not used currently
         routes.push({
           path: routePath,
           component: path,

@@ -1,27 +1,30 @@
 import { NextResponse } from 'next/server';
+import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
 
 declare global {
-  var activeSandbox: any;
+  var activeSandboxProvider: any;
   var sandboxData: any;
   var existingFiles: Set<string>;
 }
 
 export async function GET() {
   try {
-    // Check if sandbox exists
-    const sandboxExists = !!global.activeSandbox;
-    
+    // Check sandbox manager first, then fall back to global state
+    const provider = sandboxManager.getActiveProvider() || global.activeSandboxProvider;
+    const sandboxExists = !!provider;
+
     let sandboxHealthy = false;
     let sandboxInfo = null;
-    
-    if (sandboxExists && global.activeSandbox) {
+
+    if (sandboxExists && provider) {
       try {
-        // Since Python isn't available in the Vite template, just check if sandbox exists
-        // The sandbox object existing is enough to confirm it's healthy
-        sandboxHealthy = true;
+        // Check if sandbox is healthy by getting its info
+        const providerInfo = provider.getSandboxInfo();
+        sandboxHealthy = !!providerInfo;
+        
         sandboxInfo = {
-          sandboxId: global.sandboxData?.sandboxId,
-          url: global.sandboxData?.url,
+          sandboxId: providerInfo?.sandboxId || global.sandboxData?.sandboxId,
+          url: providerInfo?.url || global.sandboxData?.url,
           filesTracked: global.existingFiles ? Array.from(global.existingFiles) : [],
           lastHealthCheck: new Date().toISOString()
         };

@@ -64,15 +64,7 @@ export async function POST(request: NextRequest) {
       const builtins = ['fs', 'path', 'http', 'https', 'crypto', 'stream', 'util', 'os', 'url', 'querystring', 'child_process'];
       if (builtins.includes(imp)) return false;
       
-      // Extract package name (handle scoped packages and subpaths)
-      const parts = imp.split('/');
-      if (imp.startsWith('@')) {
-        // Scoped package like @vitejs/plugin-react
-        return true;
-      } else {
-        // Regular package, return just the first part
-        return true;
-      }
+      return true;
     });
 
     // Extract just the package names (without subpaths)
@@ -101,153 +93,90 @@ export async function POST(request: NextRequest) {
     }
 
     // Check which packages are already installed
-    const checkResult = await global.activeSandbox.runCode(`
-import os
-import json
-
-installed = []
-missing = []
-
-packages = ${JSON.stringify(uniquePackages)}
-
-for package in packages:
-    # Handle scoped packages
-    if package.startswith('@'):
-        package_path = f"/home/user/app/node_modules/{package}"
-    else:
-        package_path = f"/home/user/app/node_modules/{package}"
+    const installed: string[] = [];
+    const missing: string[] = [];
     
-    if os.path.exists(package_path):
-        installed.append(package)
-    else:
-        missing.append(package)
+    for (const packageName of uniquePackages) {
+      try {
+        const checkResult = await global.activeSandbox.runCommand({
+          cmd: 'test',
+          args: ['-d', `node_modules/${packageName}`]
+        });
+        
+        if (checkResult.exitCode === 0) {
+          installed.push(packageName);
+        } else {
+          missing.push(packageName);
+        }
+      } catch (checkError) {
+        // If test command fails, assume package is missing
+        console.debug(`Package check failed for ${packageName}:`, checkError);
+        missing.push(packageName);
+      }
+    }
 
-result = {
-    'installed': installed,
-    'missing': missing
-}
+    console.log('[detect-and-install-packages] Package status:', { installed, missing });
 
-print(json.dumps(result))
-    `);
-
-    const status = JSON.parse(checkResult.logs.stdout.join(''));
-    console.log('[detect-and-install-packages] Package status:', status);
-
-    if (status.missing.length === 0) {
+    if (missing.length === 0) {
       return NextResponse.json({
         success: true,
         packagesInstalled: [],
-        packagesAlreadyInstalled: status.installed,
+        packagesAlreadyInstalled: installed,
         message: 'All packages already installed'
       });
     }
 
     // Install missing packages
-    console.log('[detect-and-install-packages] Installing packages:', status.missing);
+    console.log('[detect-and-install-packages] Installing packages:', missing);
     
-    const installResult = await global.activeSandbox.runCode(`
-import subprocess
-import os
-import json
+    const installResult = await global.activeSandbox.runCommand({
+      cmd: 'npm',
+      args: ['install', '--save', ...missing]
+    });
 
-os.chdir('/home/user/app')
-packages_to_install = ${JSON.stringify(status.missing)}
-
-# Join packages into a single install command
-packages_str = ' '.join(packages_to_install)
-cmd = f'npm install {packages_str} --save'
-
-print(f"Running: {cmd}")
-
-# Run npm install with explicit save flag
-result = subprocess.run(['npm', 'install', '--save'] + packages_to_install, 
-                       capture_output=True, 
-                       text=True, 
-                       cwd='/home/user/app',
-                       timeout=60)
-
-print("stdout:", result.stdout)
-if result.stderr:
-    print("stderr:", result.stderr)
-
-# Verify installation
-installed = []
-failed = []
-
-for package in packages_to_install:
-    # Handle scoped packages correctly
-    if package.startswith('@'):
-        # For scoped packages like @heroicons/react
-        package_path = f"/home/user/app/node_modules/{package}"
-    else:
-        package_path = f"/home/user/app/node_modules/{package}"
+    const stdout = await installResult.stdout();
+    const stderr = await installResult.stderr();
     
-    if os.path.exists(package_path):
-        installed.append(package)
-        print(f"✓ Verified installation of {package}")
-    else:
-        # Check if it's a submodule of an installed package
-        base_package = package.split('/')[0]
-        if package.startswith('@'):
-            # For @scope/package, the base is @scope/package
-            base_package = '/'.join(package.split('/')[:2])
-        
-        base_path = f"/home/user/app/node_modules/{base_package}"
-        if os.path.exists(base_path):
-            installed.append(package)
-            print(f"✓ Verified installation of {package} (via {base_package})")
-        else:
-            failed.append(package)
-            print(f"✗ Failed to verify installation of {package}")
-
-result_data = {
-    'installed': installed,
-    'failed': failed,
-    'returncode': result.returncode
-}
-
-print("\\nResult:", json.dumps(result_data))
-    `, { timeout: 60000 });
-
-    // Parse the result more safely
-    let installStatus;
-    try {
-      const stdout = installResult.logs.stdout.join('');
-      const resultMatch = stdout.match(/Result:\s*({.*})/);
-      if (resultMatch) {
-        installStatus = JSON.parse(resultMatch[1]);
-      } else {
-        // Fallback parsing
-        const lines = stdout.split('\n');
-        const resultLine = lines.find((line: string) => line.includes('Result:'));
-        if (resultLine) {
-          installStatus = JSON.parse(resultLine.split('Result:')[1].trim());
-        } else {
-          throw new Error('Could not find Result in output');
-        }
-      }
-    } catch (parseError) {
-      console.error('[detect-and-install-packages] Failed to parse install result:', parseError);
-      console.error('[detect-and-install-packages] stdout:', installResult.logs.stdout.join(''));
-      // Fallback to assuming all packages were installed
-      installStatus = {
-        installed: status.missing,
-        failed: [],
-        returncode: 0
-      };
+    console.log('[detect-and-install-packages] Install stdout:', stdout);
+    if (stderr) {
+      console.log('[detect-and-install-packages] Install stderr:', stderr);
     }
 
-    if (installStatus.failed.length > 0) {
-      console.error('[detect-and-install-packages] Failed to install:', installStatus.failed);
+    // Verify installation
+    const finalInstalled: string[] = [];
+    const failed: string[] = [];
+
+    for (const packageName of missing) {
+      try {
+        const verifyResult = await global.activeSandbox.runCommand({
+          cmd: 'test',
+          args: ['-d', `node_modules/${packageName}`]
+        });
+        
+        if (verifyResult.exitCode === 0) {
+          finalInstalled.push(packageName);
+          console.log(`✓ Verified installation of ${packageName}`);
+        } else {
+          failed.push(packageName);
+          console.log(`✗ Failed to verify installation of ${packageName}`);
+        }
+      } catch (error) {
+        failed.push(packageName);
+        console.log(`✗ Error verifying ${packageName}:`, error);
+      }
+    }
+
+    if (failed.length > 0) {
+      console.error('[detect-and-install-packages] Failed to install:', failed);
     }
 
     return NextResponse.json({
       success: true,
-      packagesInstalled: installStatus.installed,
-      packagesFailed: installStatus.failed,
-      packagesAlreadyInstalled: status.installed,
-      message: `Installed ${installStatus.installed.length} packages`,
-      logs: installResult.logs.stdout.join('\n')
+      packagesInstalled: finalInstalled,
+      packagesFailed: failed,
+      packagesAlreadyInstalled: installed,
+      message: `Installed ${finalInstalled.length} packages`,
+      logs: stdout
     });
 
   } catch (error) {

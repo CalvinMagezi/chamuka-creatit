@@ -2,132 +2,99 @@ import { NextResponse } from 'next/server';
 
 declare global {
   var activeSandbox: any;
+  var activeSandboxProvider: any;
+  var lastViteRestartTime: number;
+  var viteRestartInProgress: boolean;
 }
+
+const RESTART_COOLDOWN_MS = 5000; // 5 second cooldown between restarts
 
 export async function POST() {
   try {
-    if (!global.activeSandbox) {
+    // Check both v1 and v2 global references
+    const provider = global.activeSandbox || global.activeSandboxProvider;
+    
+    if (!provider) {
       return NextResponse.json({ 
         success: false, 
         error: 'No active sandbox' 
       }, { status: 400 });
     }
     
-    console.log('[restart-vite] Forcing Vite restart...');
+    // Check if restart is already in progress
+    if (global.viteRestartInProgress) {
+      console.log('[restart-vite] Vite restart already in progress, skipping...');
+      return NextResponse.json({
+        success: true,
+        message: 'Vite restart already in progress'
+      });
+    }
     
-    // Kill existing Vite process and restart
-    const result = await global.activeSandbox.runCode(`
-import subprocess
-import os
-import signal
-import time
-import threading
-import json
-import sys
-
-# Kill existing Vite process
-try:
-    with open('/tmp/vite-process.pid', 'r') as f:
-        pid = int(f.read().strip())
-        os.kill(pid, signal.SIGTERM)
-        print("Killed existing Vite process")
-        time.sleep(1)
-except:
-    print("No existing Vite process found")
-
-os.chdir('/home/user/app')
-
-# Clear error file
-error_file = '/tmp/vite-errors.json'
-with open(error_file, 'w') as f:
-    json.dump({"errors": [], "lastChecked": time.time()}, f)
-
-# Function to monitor Vite output for errors
-def monitor_output(proc, error_file):
-    while True:
-        line = proc.stderr.readline()
-        if not line:
-            break
+    // Check cooldown
+    const now = Date.now();
+    if (global.lastViteRestartTime && (now - global.lastViteRestartTime) < RESTART_COOLDOWN_MS) {
+      const remainingTime = Math.ceil((RESTART_COOLDOWN_MS - (now - global.lastViteRestartTime)) / 1000);
+      console.log(`[restart-vite] Cooldown active, ${remainingTime}s remaining`);
+      return NextResponse.json({
+        success: true,
+        message: `Vite was recently restarted, cooldown active (${remainingTime}s remaining)`
+      });
+    }
+    
+    // Set the restart flag
+    global.viteRestartInProgress = true;
+    
+    console.log('[restart-vite] Using provider method to restart Vite...');
+    
+    // Use the provider's restartViteServer method if available
+    if (typeof provider.restartViteServer === 'function') {
+      await provider.restartViteServer();
+      console.log('[restart-vite] Vite restarted via provider method');
+    } else {
+      // Fallback to manual restart using provider's runCommand
+      console.log('[restart-vite] Fallback to manual Vite restart...');
+      
+      // Kill existing Vite processes
+      try {
+        await provider.runCommand('pkill -f vite');
+        console.log('[restart-vite] Killed existing Vite processes');
         
-        sys.stdout.write(line)  # Also print to console
-        
-        # Check for import resolution errors
-        if "Failed to resolve import" in line:
-            try:
-                # Extract package name from error
-                import_match = line.find('"')
-                if import_match != -1:
-                    end_match = line.find('"', import_match + 1)
-                    if end_match != -1:
-                        package_name = line[import_match + 1:end_match]
-                        # Skip relative imports
-                        if not package_name.startswith('.'):
-                            with open(error_file, 'r') as f:
-                                data = json.load(f)
-                            
-                            # Handle scoped packages correctly
-                            if package_name.startswith('@'):
-                                # For @scope/package, keep the scope
-                                pkg_parts = package_name.split('/')
-                                if len(pkg_parts) >= 2:
-                                    final_package = '/'.join(pkg_parts[:2])
-                                else:
-                                    final_package = package_name
-                            else:
-                                # For regular packages, just take the first part
-                                final_package = package_name.split('/')[0]
-                            
-                            error_obj = {
-                                "type": "npm-missing",
-                                "package": final_package,
-                                "message": line.strip(),
-                                "timestamp": time.time()
-                            }
-                            
-                            # Avoid duplicates
-                            if not any(e['package'] == error_obj['package'] for e in data['errors']):
-                                data['errors'].append(error_obj)
-                                
-                            with open(error_file, 'w') as f:
-                                json.dump(data, f)
-                                
-                            print(f"WARNING: Detected missing package: {error_obj['package']}")
-            except Exception as e:
-                print(f"Error parsing Vite error: {e}")
-
-# Start Vite with error monitoring
-process = subprocess.Popen(
-    ['npm', 'run', 'dev'],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-    bufsize=1
-)
-
-# Start monitoring thread
-monitor_thread = threading.Thread(target=monitor_output, args=(process, error_file))
-monitor_thread.daemon = True
-monitor_thread.start()
-
-print("Vite restarted successfully!")
-
-# Store process info for later
-with open('/tmp/vite-process.pid', 'w') as f:
-    f.write(str(process.pid))
-
-# Wait for Vite to fully start
-time.sleep(5)
-print("Vite is ready")
-    `);
+        // Wait a moment for processes to terminate
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } catch {
+        console.log('[restart-vite] No existing Vite processes found');
+      }
+      
+      // Clear any error tracking files
+      try {
+        await provider.runCommand('bash -c "echo \'{\\"errors\\": [], \\"lastChecked\\": '+ Date.now() +'}\' > /tmp/vite-errors.json"');
+      } catch {
+        // Ignore if this fails
+      }
+      
+      // Start Vite dev server in background
+      await provider.runCommand('sh -c "nohup npm run dev > /tmp/vite.log 2>&1 &"');
+      console.log('[restart-vite] Vite dev server restarted');
+      
+      // Wait for Vite to start up
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+    
+    // Update global state
+    global.lastViteRestartTime = Date.now();
+    global.viteRestartInProgress = false;
     
     return NextResponse.json({
       success: true,
-      message: 'Vite restarted successfully',
-      output: result.output
+      message: 'Vite restarted successfully'
     });
     
   } catch (error) {
     console.error('[restart-vite] Error:', error);
+    
+    // Clear the restart flag on error
+    global.viteRestartInProgress = false;
+    
     return NextResponse.json({ 
       success: false, 
       error: (error as Error).message 

@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Sandbox } from '@e2b/code-interpreter';
 
 // Get active sandbox from global state (in production, use a proper state management solution)
 declare global {
@@ -26,30 +25,32 @@ export async function POST(request: NextRequest) {
     
     console.log(`[run-command] Executing: ${command}`);
     
-    const result = await global.activeSandbox.runCode(`
-import subprocess
-import os
-
-os.chdir('/home/user/app')
-result = subprocess.run(${JSON.stringify(command.split(' '))}, 
-                       capture_output=True, 
-                       text=True, 
-                       shell=False)
-
-print("STDOUT:")
-print(result.stdout)
-if result.stderr:
-    print("\\nSTDERR:")
-    print(result.stderr)
-print(f"\\nReturn code: {result.returncode}")
-    `);
+    // Parse command and arguments
+    const commandParts = command.trim().split(/\s+/);
+    const cmd = commandParts[0];
+    const args = commandParts.slice(1);
     
-    const output = result.logs.stdout.join('\n');
+    // Execute command using Vercel Sandbox
+    const result = await global.activeSandbox.runCommand({
+      cmd,
+      args
+    });
+    
+    // Get output streams
+    const stdout = await result.stdout();
+    const stderr = await result.stderr();
+    
+    const output = [
+      stdout ? `STDOUT:\n${stdout}` : '',
+      stderr ? `\nSTDERR:\n${stderr}` : '',
+      `\nExit code: ${result.exitCode}`
+    ].filter(Boolean).join('');
     
     return NextResponse.json({
       success: true,
       output,
-      message: 'Command executed successfully'
+      exitCode: result.exitCode,
+      message: result.exitCode === 0 ? 'Command executed successfully' : 'Command completed with non-zero exit code'
     });
     
   } catch (error) {

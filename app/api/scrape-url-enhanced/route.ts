@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         url,
-        formats: ['markdown', 'html'],
+        formats: ['markdown', 'html', 'screenshot'],
         waitFor: 3000,
         timeout: 30000,
         blockAds: true,
@@ -52,6 +52,10 @@ export async function POST(request: NextRequest) {
           {
             type: 'wait',
             milliseconds: 2000
+          },
+          {
+            type: 'screenshot',
+            fullPage: false // Just visible viewport for performance
           }
         ]
       })
@@ -68,7 +72,11 @@ export async function POST(request: NextRequest) {
       throw new Error('Failed to scrape content');
     }
     
-    const { markdown, html, metadata } = data.data;
+    const { markdown, metadata, screenshot, actions } = data.data;
+    // html available but not used in current implementation
+    
+    // Get screenshot from either direct field or actions result
+    const screenshotUrl = screenshot || actions?.screenshots?.[0] || null;
     
     // Sanitize the markdown content
     const sanitizedMarkdown = sanitizeQuotes(markdown || '');
@@ -91,11 +99,13 @@ ${sanitizedMarkdown}
       success: true,
       url,
       content: formattedContent,
+      screenshot: screenshotUrl,
       structured: {
         title: sanitizeQuotes(title),
         description: sanitizeQuotes(description),
         content: sanitizedMarkdown,
-        url
+        url,
+        screenshot: screenshotUrl
       },
       metadata: {
         scraper: 'firecrawl-enhanced',

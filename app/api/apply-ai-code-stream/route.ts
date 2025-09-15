@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Sandbox } from '@e2b/code-interpreter';
+// Sandbox import not needed - using global sandbox from sandbox-manager
 import type { SandboxState } from '@/types/sandbox';
 import type { ConversationState } from '@/types/conversation';
+import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
 
 declare global {
   var conversationState: ConversationState | null;
-  var activeSandbox: any;
+  var activeSandboxProvider: any;
   var existingFiles: Set<string>;
   var sandboxState: SandboxState;
 }
@@ -294,73 +295,88 @@ export async function POST(request: NextRequest) {
       global.existingFiles = new Set<string>();
     }
     
-    // First, always check the global state for active sandbox
-    let sandbox = global.activeSandbox;
+    // Try to get provider from sandbox manager first
+    let provider = sandboxId ? sandboxManager.getProvider(sandboxId) : sandboxManager.getActiveProvider();
     
-    // If we don't have a sandbox in this instance but we have a sandboxId,
-    // reconnect to the existing sandbox
-    if (!sandbox && sandboxId) {
-      console.log(`[apply-ai-code-stream] Sandbox ${sandboxId} not in this instance, attempting reconnect...`);
+    // Fall back to global state if not found in manager
+    if (!provider) {
+      provider = global.activeSandboxProvider;
+    }
+
+    // If we have a sandboxId but no provider, try to get or create one
+    if (!provider && sandboxId) {
+      console.log(`[apply-ai-code-stream] No provider found for sandbox ${sandboxId}, attempting to get or create...`);
       
       try {
-        // Reconnect to the existing sandbox using E2B's connect method
-        sandbox = await Sandbox.connect(sandboxId, { apiKey: process.env.E2B_API_KEY });
-        console.log(`[apply-ai-code-stream] Successfully reconnected to sandbox ${sandboxId}`);
+        provider = await sandboxManager.getOrCreateProvider(sandboxId);
         
-        // Store the reconnected sandbox globally for this instance
-        global.activeSandbox = sandbox;
-        
-        // Update sandbox data if needed
-        if (!global.sandboxData) {
-          const host = (sandbox as any).getHost(5173);
-          global.sandboxData = {
-            sandboxId,
-            url: `https://${host}`
-          };
+        // If we got a new provider (not reconnected), we need to create a new sandbox
+        if (!provider.getSandboxInfo()) {
+          console.log(`[apply-ai-code-stream] Creating new sandbox since reconnection failed for ${sandboxId}`);
+          await provider.createSandbox();
+          await provider.setupViteApp();
+          sandboxManager.registerSandbox(sandboxId, provider);
         }
         
-        // Initialize existingFiles if not already
-        if (!global.existingFiles) {
-          global.existingFiles = new Set<string>();
-        }
-      } catch (reconnectError) {
-        console.error(`[apply-ai-code-stream] Failed to reconnect to sandbox ${sandboxId}:`, reconnectError);
-        
-        // If reconnection fails, we'll still try to return a meaningful response
+        // Update legacy global state
+        global.activeSandboxProvider = provider;
+        console.log(`[apply-ai-code-stream] Successfully got provider for sandbox ${sandboxId}`);
+      } catch (providerError) {
+        console.error(`[apply-ai-code-stream] Failed to get or create provider for sandbox ${sandboxId}:`, providerError);
         return NextResponse.json({
           success: false,
-          error: `Failed to reconnect to sandbox ${sandboxId}. The sandbox may have expired or been terminated.`,
+          error: `Failed to create sandbox provider for ${sandboxId}. The sandbox may have expired.`,
           results: {
             filesCreated: [],
             packagesInstalled: [],
             commandsExecuted: [],
-            errors: [`Sandbox reconnection failed: ${(reconnectError as Error).message}`]
+            errors: [`Sandbox provider creation failed: ${(providerError as Error).message}`]
           },
           explanation: parsed.explanation,
           structure: parsed.structure,
           parsedFiles: parsed.files,
           message: `Parsed ${parsed.files.length} files but couldn't apply them - sandbox reconnection failed.`
-        });
+        }, { status: 500 });
       }
     }
     
-    // If no sandbox at all and no sandboxId provided, return an error
-    if (!sandbox && !sandboxId) {
-      console.log('[apply-ai-code-stream] No sandbox available and no sandboxId provided');
-      return NextResponse.json({
-        success: false,
-        error: 'No active sandbox found. Please create a sandbox first.',
-        results: {
-          filesCreated: [],
-          packagesInstalled: [],
-          commandsExecuted: [],
-          errors: ['No sandbox available']
-        },
-        explanation: parsed.explanation,
-        structure: parsed.structure,
-        parsedFiles: parsed.files,
-        message: `Parsed ${parsed.files.length} files but no sandbox available to apply them.`
-      });
+    // If we still don't have a provider, create a new one
+    if (!provider) {
+      console.log(`[apply-ai-code-stream] No active provider found, creating new sandbox...`);
+      try {
+        const { SandboxFactory } = await import('@/lib/sandbox/factory');
+        provider = SandboxFactory.create();
+        const sandboxInfo = await provider.createSandbox();
+        await provider.setupViteApp();
+
+        // Register with sandbox manager
+        sandboxManager.registerSandbox(sandboxInfo.sandboxId, provider);
+        
+        // Store in legacy global state
+        global.activeSandboxProvider = provider;
+        global.sandboxData = {
+          sandboxId: sandboxInfo.sandboxId,
+          url: sandboxInfo.url
+        };
+
+        console.log(`[apply-ai-code-stream] Created new sandbox successfully`);
+      } catch (createError) {
+        console.error(`[apply-ai-code-stream] Failed to create new sandbox:`, createError);
+        return NextResponse.json({
+          success: false,
+          error: `Failed to create new sandbox: ${createError instanceof Error ? createError.message : 'Unknown error'}`,
+          results: {
+            filesCreated: [],
+            packagesInstalled: [],
+            commandsExecuted: [],
+            errors: [`Sandbox creation failed: ${createError instanceof Error ? createError.message : 'Unknown error'}`]
+          },
+          explanation: parsed.explanation,
+          structure: parsed.structure,
+          parsedFiles: parsed.files,
+          message: `Parsed ${parsed.files.length} files but couldn't apply them - sandbox creation failed.`
+        }, { status: 500 });
+      }
     }
     
     // Create a response stream for real-time updates
@@ -374,8 +390,8 @@ export async function POST(request: NextRequest) {
       await writer.write(encoder.encode(message));
     };
     
-    // Start processing in background (pass sandbox and request to the async function)
-    (async (sandboxInstance, req) => {
+    // Start processing in background (pass provider and request to the async function)
+    (async (providerInstance, req) => {
       const results = {
         filesCreated: [] as string[],
         filesUpdated: [] as string[],
@@ -432,7 +448,7 @@ export async function POST(request: NextRequest) {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ 
                 packages: uniquePackages,
-                sandboxId: sandboxId || (sandboxInstance as any).sandboxId
+                sandboxId: sandboxId || providerInstance.getSandboxInfo()?.sandboxId
               })
             });
             
@@ -463,7 +479,8 @@ export async function POST(request: NextRequest) {
                       if (data.type === 'success' && data.installedPackages) {
                         results.packagesInstalled = data.installedPackages;
                       }
-                    } catch (e) {
+                    } catch (parseError) {
+          console.debug('Error parsing terminal output:', parseError);
                       // Ignore parse errors
                     }
                   }
@@ -525,7 +542,6 @@ export async function POST(request: NextRequest) {
               normalizedPath = 'src/' + normalizedPath;
             }
             
-            const fullPath = `/home/user/app/${normalizedPath}`;
             const isUpdate = global.existingFiles.has(normalizedPath);
             
             // Remove any CSS imports from JSX/JS files (we're using Tailwind)
@@ -534,19 +550,23 @@ export async function POST(request: NextRequest) {
               fileContent = fileContent.replace(/import\s+['"]\.\/[^'"]+\.css['"];?\s*\n?/g, '');
             }
             
-            // Write the file using Python (code-interpreter SDK)
-            const escapedContent = fileContent
-              .replace(/\\/g, '\\\\')
-              .replace(/"""/g, '\\"\\"\\"')
-              .replace(/\$/g, '\\$');
+            // Fix common Tailwind CSS errors in CSS files
+            if (file.path.endsWith('.css')) {
+              // Replace shadow-3xl with shadow-2xl (shadow-3xl doesn't exist)
+              fileContent = fileContent.replace(/shadow-3xl/g, 'shadow-2xl');
+              // Replace any other non-existent shadow utilities
+              fileContent = fileContent.replace(/shadow-4xl/g, 'shadow-2xl');
+              fileContent = fileContent.replace(/shadow-5xl/g, 'shadow-2xl');
+            }
             
-            await sandboxInstance.runCode(`
-import os
-os.makedirs(os.path.dirname("${fullPath}"), exist_ok=True)
-with open("${fullPath}", 'w') as f:
-    f.write("""${escapedContent}""")
-print(f"File written: ${fullPath}")
-            `);
+            // Create directory if needed
+            const dirPath = normalizedPath.includes('/') ? normalizedPath.substring(0, normalizedPath.lastIndexOf('/')) : '';
+            if (dirPath) {
+              await providerInstance.runCommand(`mkdir -p ${dirPath}`);
+            }
+
+            // Write the file using provider
+            await providerInstance.writeFile(normalizedPath, fileContent);
             
             // Update file cache
             if (global.sandboxState?.fileCache) {
@@ -599,27 +619,30 @@ print(f"File written: ${fullPath}")
                 action: 'executing'
               });
               
-              // Use E2B commands.run() for cleaner execution
-              const result = await sandboxInstance.commands.run(cmd, {
-                cwd: '/home/user/app',
-                timeout: 60,
-                on_stdout: async (data: string) => {
-                  await sendProgress({
-                    type: 'command-output',
-                    command: cmd,
-                    output: data,
-                    stream: 'stdout'
-                  });
-                },
-                on_stderr: async (data: string) => {
-                  await sendProgress({
-                    type: 'command-output',
-                    command: cmd,
-                    output: data,
-                    stream: 'stderr'
-                  });
-                }
-              });
+              // Use provider runCommand
+              const result = await providerInstance.runCommand(cmd);
+
+              // Get command output from provider result
+              const stdout = result.stdout;
+              const stderr = result.stderr;
+              
+              if (stdout) {
+                await sendProgress({
+                  type: 'command-output',
+                  command: cmd,
+                  output: stdout,
+                  stream: 'stdout'
+                });
+              }
+              
+              if (stderr) {
+                await sendProgress({
+                  type: 'command-output',
+                  command: cmd,
+                  output: stderr,
+                  stream: 'stderr'
+                });
+              }
               
               if (results.commandsExecuted) {
                 results.commandsExecuted.push(cmd);
@@ -686,7 +709,7 @@ print(f"File written: ${fullPath}")
       } finally {
         await writer.close();
       }
-    })(sandbox, request);
+    })(provider, request);
     
     // Return the stream
     return new Response(stream.readable, {
@@ -696,7 +719,7 @@ print(f"File written: ${fullPath}")
         'Connection': 'keep-alive',
       },
     });
-    
+
   } catch (error) {
     console.error('Apply AI code stream error:', error);
     return NextResponse.json(
