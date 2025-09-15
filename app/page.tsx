@@ -87,6 +87,86 @@ function AISandboxPageInner() {
   const [loadingStage, setLoadingStage] = useState<'gathering' | 'planning' | 'generating' | null>(null);
   const [sandboxFiles, setSandboxFiles] = useState<Record<string, string>>({});
   const [fileStructure, setFileStructure] = useState<string>('');
+  // --- .drawit import state (MVP) ---
+  const [drawitImport, setDrawitImport] = useState<{
+    loading: boolean;
+    fileName?: string;
+    analysis?: any;
+    error?: string;
+    generating: boolean;
+    showPreview?: boolean;
+    diagram?: any;
+  }>({ loading: false, generating: false, showPreview: false });
+  const drawitInputRef = useRef<HTMLInputElement>(null);
+  const triggerDrawitSelect = () => {
+    if (drawitImport.loading || drawitImport.generating) return;
+    drawitInputRef.current?.click();
+  };
+  const handleDrawitFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setDrawitImport(d => ({ ...d, loading: true, fileName: file.name, error: undefined, analysis: undefined }));
+    try {
+      const text = await file.text();
+      let parsed: any;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        throw new Error('Invalid JSON in .drawit file');
+      }
+      // Dry-run generation to preview routes & screens
+      const dryResp = await fetch('/api/generate-from-drawit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ diagram: parsed, options: { dryRun: true } })
+      });
+      const dryJson = await dryResp.json();
+      if (!dryResp.ok || !dryJson.ok) {
+        throw new Error(dryJson.errors?.map((e: any) => e.message).join('; ') || 'Analysis failed');
+      }
+      setDrawitImport(d => ({ ...d, loading: false, analysis: dryJson, showPreview: true, diagram: parsed }));
+      const screenCount = dryJson.analysis?.screens?.length ?? 0;
+      addChatMessage(
+        `Analyzed .drawit file "${file.name}" (${screenCount} screen${screenCount === 1 ? '' : 's'}). Routes: ${dryJson.preview?.manifest?.screens.map((s: any) => s.route).join(', ') || 'n/a'}.`,
+        'system'
+      );
+    } catch (err: any) {
+      setDrawitImport(d => ({ ...d, loading: false, generating: false, error: err.message }));
+      addChatMessage(`.drawit import error: ${err.message}`, 'error');
+    } finally {
+      if (drawitInputRef.current) {
+        drawitInputRef.current.value = '';
+      }
+    }
+  };
+
+  const generateFromDrawit = async () => {
+    if (!drawitImport.analysis || !drawitImport.diagram) return;
+    try {
+      setDrawitImport(d => ({ ...d, generating: true, error: undefined }));
+      const writeResp = await fetch('/api/generate-from-drawit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ diagram: drawitImport.diagram, options: { dryRun: false, prune: true } })
+      });
+      const writeJson = await writeResp.json();
+      if (!writeResp.ok || !writeJson.ok) {
+        throw new Error(writeJson.errors?.map((e: any) => e.message).join('; ') || 'Generation failed');
+      }
+      setDrawitImport(d => ({ ...d, generating: false, showPreview: false }));
+      addChatMessage(
+        `Generated ${writeJson.manifest.screens.length} route page(s) from "${drawitImport.fileName}": ${writeJson.manifest.screens.map((s: any) => s.route).join(', ')}`,
+        'system'
+      );
+    } catch (err: any) {
+      setDrawitImport(d => ({ ...d, generating: false, error: err.message }));
+      addChatMessage(`.drawit generation error: ${err.message}`, 'error');
+    }
+  };
+
+  const cancelDrawitPreview = () => {
+    setDrawitImport(d => ({ ...d, showPreview: false }));
+  };
   
   const [conversationContext, setConversationContext] = useState<{
     scrapedWebsites: Array<{ url: string; content: any; timestamp: Date }>;
@@ -2829,6 +2909,27 @@ Focus on the key sections and content, making it clean and modern.`;
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
             </svg>
           </Button>
+          {/* .drawit import hidden input & trigger */}
+          <input
+            ref={drawitInputRef}
+            type="file"
+            accept=".drawit,application/json"
+            className="hidden"
+            onChange={handleDrawitFileChange}
+          />
+          <Button
+            variant="code"
+            onClick={triggerDrawitSelect}
+            size="sm"
+            title={drawitImport.loading ? 'Analyzing...' : drawitImport.generating ? 'Generating...' : 'Import .drawit design'}
+            disabled={drawitImport.loading || drawitImport.generating}
+          >
+            {drawitImport.loading
+              ? 'Analyzing…'
+              : drawitImport.generating
+                ? 'Building…'
+                : '.drawit'}
+          </Button>
           <div className="inline-flex items-center gap-2 bg-[#36322F] text-white px-3 py-1.5 rounded-[10px] text-sm font-medium [box-shadow:inset_0px_-2px_0px_0px_#171310,_0px_1px_6px_0px_rgba(58,_33,_8,_58%)]">
             <span id="status-text">{status.text}</span>
             <div className={`w-2 h-2 rounded-full ${status.active ? 'bg-green-500' : 'bg-gray-500'}`} />
@@ -3190,6 +3291,88 @@ Focus on the key sections and content, making it clean and modern.`;
 
 
 
+    {drawitImport.showPreview && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-lg shadow-xl w-[640px] max-h-[80vh] flex flex-col text-gray-900">
+          <div className="px-4 py-3 border-b flex items-center justify-between">
+            <h2 className="text-sm font-semibold">.drawit Analysis Preview</h2>
+            <button
+              onClick={cancelDrawitPreview}
+              className="text-gray-500 hover:text-gray-700 transition-colors"
+              title="Close"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" stroke="currentColor" fill="none">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+          <div className="p-4 overflow-y-auto text-sm space-y-3">
+            <div>
+              <div className="font-medium">File:</div>
+              <div className="font-mono text-xs">{drawitImport.fileName}</div>
+            </div>
+            <div>
+              <div className="font-medium mb-1">Detected Screens</div>
+              <div className="border rounded-md divide-y">
+                {(drawitImport.analysis?.preview?.manifest?.screens || []).map((s: any) => (
+                  <div key={s.route} className="px-3 py-2 flex items-center justify-between">
+                    <div className="flex flex-col">
+                      <span className="font-mono text-xs">{s.route}</span>
+                      {s.frame && (
+                        <span className="text-[10px] text-gray-500">
+                          {s.frame.width}x{s.frame.height}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[10px] text-gray-600">
+                      {(s.elements?.length ?? s.elementCount ?? 0)} elements
+                    </div>
+                  </div>
+                ))}
+                {(!drawitImport.analysis?.preview?.manifest?.screens ||
+                  drawitImport.analysis.preview.manifest.screens.length === 0) && (
+                  <div className="px-3 py-4 text-xs text-gray-500">No screens detected</div>
+                )}
+              </div>
+            </div>
+            {drawitImport.analysis?.analysis?.warnings && drawitImport.analysis.analysis.warnings.length > 0 && (
+              <div>
+                <div className="font-medium mb-1">Warnings</div>
+                <ul className="list-disc ml-5 space-y-1 text-xs">
+                  {drawitImport.analysis.analysis.warnings.map((w: any, i: number) => (
+                    <li key={i}>{typeof w === 'string' ? w : JSON.stringify(w)}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {drawitImport.error && (
+              <div className="text-xs text-red-600">
+                {drawitImport.error}
+              </div>
+            )}
+          </div>
+          <div className="px-4 py-3 border-t flex justify-end gap-2">
+            <Button
+              variant="code"
+              size="sm"
+              onClick={cancelDrawitPreview}
+              disabled={drawitImport.generating}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="code"
+              size="sm"
+              onClick={generateFromDrawit}
+              disabled={drawitImport.generating}
+              title="Generate Next.js pages from this design"
+            >
+              {drawitImport.generating ? 'Generating…' : 'Generate Pages'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
     </div>
   );
 }

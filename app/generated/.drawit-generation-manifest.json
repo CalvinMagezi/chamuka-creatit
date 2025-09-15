@@ -1,0 +1,16 @@
+{
+  "sourceHash": "dbb546d88b9d69ed07cbc9c09bfeb656",
+  "generatedAt": "2025-08-18T14:00:13.511Z",
+  "screens": [
+    {
+      "route": "/",
+      "file": "page.tsx",
+      "componentCount": 25
+    },
+    {
+      "route": "/2",
+      "file": "2/page.tsx",
+      "componentCount": 12
+    }
+  ]
+}
